@@ -11,7 +11,7 @@ An interactive Python dashboard that visualises **UK Brent crude oil prices** an
 | Feature | Details |
 |---|---|
 | 📈 Brent chart | Daily USD/barrel – real data via *yfinance* or realistic simulation |
-| ⛽ Diesel chart | Daily EUR/litre – simulated data correlated with Brent |
+| ⛽ Diesel chart | Stacked bar showing daily breakdown: Netto-Kraftstoffpreis · Energiesteuer (0.4704 €/L) · CO2-Steuer (~0.15 €/L) · Mehrwertsteuer (19%) – total ≈ 2.40 €/L |
 | 🔍 Zoom / Pan | Mouse-wheel zoom + drag-to-pan enabled by default |
 | 🖱️ Hover tooltips | Price + date shown on mouse-over |
 | 📐 Correlation | Pearson *r* and p-value displayed at the top of the dashboard |
