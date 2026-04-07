@@ -5,9 +5,12 @@ Interactive dashboard showing UK Brent crude oil prices and German diesel
 prices for the last 4 weeks.
 
 Features:
-- Separate charts for Brent and Diesel prices
-- Stacked bar chart for diesel showing the German tax breakdown:
-    Netto-Kraftstoffpreis | Energiesteuer | CO2-Steuer | Mehrwertsteuer
+- Single line chart showing Brent crude (left axis, USD/barrel) alongside
+  each diesel price component as its own line (right axis, EUR/litre):
+    Netto-Kraftstoffpreis | Energiesteuer | CO2-Steuer | Mehrwertsteuer | Gesamt
+- Real data sources:
+    * Brent crude: yfinance (BZ=F) with simulation fallback
+    * German diesel: EU Weekly Oil Bulletin with simulation fallback
 - Zoom / Pan / Hover-Tooltip interactivity (powered by Plotly)
 - Pearson correlation coefficient displayed in the dashboard
 - Exported as a fully self-contained HTML file (dashboard.html,
@@ -23,6 +26,7 @@ Output:
 from __future__ import annotations
 
 import datetime
+import io
 import warnings
 
 import numpy as np
@@ -32,7 +36,7 @@ from plotly.subplots import make_subplots
 from scipy import stats
 
 # ---------------------------------------------------------------------------
-# Optional: try to fetch real Brent data via yfinance
+# Optional imports
 # ---------------------------------------------------------------------------
 try:
     import yfinance as yf  # type: ignore
@@ -40,6 +44,13 @@ try:
     _YFINANCE_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _YFINANCE_AVAILABLE = False
+
+try:
+    import requests as _requests  # type: ignore
+
+    _REQUESTS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    _REQUESTS_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +126,67 @@ def fetch_brent_prices(dates: pd.DatetimeIndex) -> pd.Series:
     return pd.Series(prices, index=dates, name="Brent (USD/barrel)")
 
 
+def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
+    """
+    Try to fetch official weekly German diesel consumer prices (EUR/litre,
+    tax-inclusive) from the EU Weekly Oil Bulletin Excel file published by the
+    European Commission (DG Energy).
+
+    Source: https://energy.ec.europa.eu/data-and-analysis/weekly-oil-bulletin_en
+
+    Returns a daily Series (forward-filled from weekly values) on success, or
+    None if the data cannot be retrieved.
+    """
+    if not _REQUESTS_AVAILABLE:
+        return None
+
+    # The Commission publishes the full historical prices in a single Excel
+    # workbook.  The URL is stable across updates.
+    url = (
+        "https://energy.ec.europa.eu/system/files/"
+        "2024-12/Oil_Bulletin_Prices_History.xlsx"
+    )
+    try:
+        resp = _requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return None
+
+        xl = pd.read_excel(
+            io.BytesIO(resp.content),
+            sheet_name=None,  # load all sheets so we can search
+            header=None,
+        )
+
+        # Look for a sheet that contains German diesel consumer prices.
+        # The sheet is typically named "Prices with taxes, per CTY" or similar.
+        for sheet_name, df in xl.items():
+            if "tax" not in str(sheet_name).lower() and "price" not in str(sheet_name).lower():
+                continue
+
+            # Search for the row that labels Germany diesel
+            for row_idx in range(min(20, len(df))):
+                row_str = " ".join(str(c) for c in df.iloc[row_idx].values)
+                if "germany" in row_str.lower() or "deutschland" in row_str.lower():
+                    if "diesel" in row_str.lower() or "gasoil" in row_str.lower():
+                        # Dates are usually in the first row; values follow
+                        header_row = df.iloc[0]
+                        date_cols = pd.to_datetime(header_row, errors="coerce")
+                        values = pd.to_numeric(df.iloc[row_idx], errors="coerce")
+                        s = pd.Series(
+                            values.values, index=date_cols
+                        ).dropna()
+                        if s.empty:
+                            continue
+                        # Prices in the bulletin are in EUR/1000 litres
+                        s = s / 1000.0
+                        s = s.reindex(dates).ffill().bfill()
+                        s.name = "Gesamt"
+                        return s
+    except Exception:  # pragma: no cover – network / parse errors
+        pass
+    return None
+
+
 def fetch_diesel_prices(
     dates: pd.DatetimeIndex, brent: pd.Series | None = None
 ) -> pd.DataFrame:
@@ -125,19 +197,45 @@ def fetch_diesel_prices(
       This component fluctuates daily; it is partially driven by Brent crude
       returns when Brent data is supplied, reflecting the real-world link
       between crude oil and retail diesel prices.
-    * **Energiesteuer** – fixed energy/mineral oil tax (Energiesteuergesetz).
-    * **CO2-Steuer** – CO2 levy (BEHG) based on the current CO2 price.
+    * **Energiesteuer** – fixed energy/mineral oil tax (Energiesteuergesetz
+      §2 Abs.1 Nr.4: 0.4704 EUR/L).
+    * **CO2-Steuer** – CO2 levy (BEHG at 55 EUR/tonne CO2; diesel ~2.65 kg/L).
     * **Mehrwertsteuer (19 %)** – VAT applied on the sum of the three components
       above, so it also fluctuates slightly with the net price.
 
-    The resulting total retail price starts at approximately 2.40 EUR/litre.
+    Data source: tries the EU Weekly Oil Bulletin first (European Commission,
+    DG Energy); falls back to realistic simulated data when the bulletin is
+    unavailable.  The resulting total retail price is approximately 2.40 EUR/L.
 
     Returns a DataFrame with columns:
         ``Netto-Kraftstoffpreis``, ``Energiesteuer``, ``CO2-Steuer``,
         ``Mehrwertsteuer (19%)``, ``Gesamt``
     """
-    rng = np.random.default_rng(seed=99)
     n = len(dates)
+
+    # -- Try real data first -------------------------------------------------
+    real_total = _fetch_eu_oil_bulletin_diesel(dates)
+
+    if real_total is not None:
+        # Decompose the real total into fixed + variable components
+        before_mwst = real_total / (1.0 + DIESEL_MWST_RATE)
+        mwst = real_total - before_mwst
+        net_prices = (before_mwst - DIESEL_ENERGIESTEUER - DIESEL_CO2_STEUER).clip(lower=0.0)
+        energiesteuer = np.full(n, DIESEL_ENERGIESTEUER)
+        co2 = np.full(n, DIESEL_CO2_STEUER)
+        return pd.DataFrame(
+            {
+                "Netto-Kraftstoffpreis": net_prices.values,
+                "Energiesteuer": energiesteuer,
+                "CO2-Steuer": co2,
+                "Mehrwertsteuer (19%)": mwst.values,
+                "Gesamt": real_total.values,
+            },
+            index=dates,
+        )
+
+    # -- Simulation fallback -------------------------------------------------
+    rng = np.random.default_rng(seed=99)
 
     # Independent daily noise for the net price
     noise = rng.normal(loc=0.0, scale=DIESEL_NET_VOLATILITY, size=n)
@@ -205,6 +303,11 @@ def interpret_correlation(r: float) -> str:
 def build_dashboard(output_file: str = "dashboard.html") -> None:
     """Build the interactive Plotly dashboard and write it to *output_file*.
 
+    The chart shows Brent crude oil and every German diesel price component
+    (Netto-Kraftstoffpreis, Energiesteuer, CO2-Steuer, Mehrwertsteuer, Gesamt)
+    as individual lines in a single chart.  Brent uses the left y-axis
+    (USD/barrel); all diesel lines use the right y-axis (EUR/litre).
+
     The generated HTML file embeds Plotly JS inline so it can be opened
     without an internet connection.
     """
@@ -219,66 +322,57 @@ def build_dashboard(output_file: str = "dashboard.html") -> None:
     corr_label = interpret_correlation(r)
     p_str = f"{p_val:.4f}" if not np.isnan(p_val) else "n/a"
 
-    # -- Layout --------------------------------------------------------------
-    fig = make_subplots(
-        rows=2,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.14,
-        subplot_titles=(
-            "🛢️  UK Brent Rohöl – Preis (USD/Barrel)",
-            "⛽  Dieselpreis Deutschland – Zusammensetzung (EUR/Liter)",
-        ),
-    )
+    # -- Layout: single chart with secondary y-axis --------------------------
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # -- Brent trace ---------------------------------------------------------
+    # -- Brent trace (left / primary y-axis) ---------------------------------
     fig.add_trace(
         go.Scatter(
             x=brent.index,
             y=brent.values,
             mode="lines+markers",
-            name="Brent Rohöl",
-            line=dict(color="#1f77b4", width=2),
+            name="Brent Rohöl (USD/Barrel)",
+            line=dict(color="#1f77b4", width=2.5),
             marker=dict(size=5),
             hovertemplate=(
+                "<b>Brent Rohöl</b><br>"
                 "<b>Datum:</b> %{x|%d.%m.%Y}<br>"
                 "<b>Preis:</b> %{y:.2f} USD/Barrel<extra></extra>"
             ),
         ),
-        row=1,
-        col=1,
+        secondary_y=False,
     )
 
-    # -- Diesel stacked bar traces -------------------------------------------
-    # Colours for the four tax/price components
-    component_colours = {
-        "Netto-Kraftstoffpreis": "#4e9a8c",
-        "Energiesteuer": "#e07b39",
-        "CO2-Steuer": "#c0392b",
-        "Mehrwertsteuer (19%)": "#8e44ad",
+    # -- Diesel component traces (right / secondary y-axis) ------------------
+    component_styles: dict[str, dict] = {
+        "Netto-Kraftstoffpreis": dict(color="#4e9a8c", dash="solid", width=2),
+        "Energiesteuer":         dict(color="#e07b39", dash="dot",   width=1.8),
+        "CO2-Steuer":            dict(color="#c0392b", dash="dot",   width=1.8),
+        "Mehrwertsteuer (19%)":  dict(color="#8e44ad", dash="dot",   width=1.8),
+        "Gesamt":                dict(color="#2c3e50", dash="solid", width=2.5),
     }
-    components = ["Netto-Kraftstoffpreis", "Energiesteuer", "CO2-Steuer", "Mehrwertsteuer (19%)"]
 
-    for comp in components:
+    for comp, style in component_styles.items():
         fig.add_trace(
-            go.Bar(
+            go.Scatter(
                 x=diesel_df.index,
                 y=diesel_df[comp].values,
-                name=comp,
-                marker_color=component_colours[comp],
+                mode="lines+markers",
+                name=f"{comp} (EUR/L)",
+                line=style,
+                marker=dict(size=4),
                 hovertemplate=(
                     f"<b>{comp}</b><br>"
                     "<b>Datum:</b> %{x|%d.%m.%Y}<br>"
-                    "<b>Anteil:</b> %{y:.4f} EUR/L<extra></extra>"
+                    "<b>Wert:</b> %{y:.4f} EUR/L<extra></extra>"
                 ),
             ),
-            row=2,
-            col=1,
+            secondary_y=True,
         )
 
     # -- Correlation annotation ----------------------------------------------
     corr_text = (
-        f"Pearson r = {r:.4f} ({corr_label})<br>"
+        f"Pearson r (Brent ↔ Diesel Gesamt) = {r:.4f} ({corr_label})<br>"
         f"p-Wert = {p_str}  |  n = {len(brent.dropna())} Handelstage"
     )
 
@@ -287,23 +381,33 @@ def build_dashboard(output_file: str = "dashboard.html") -> None:
         xref="paper",
         yref="paper",
         x=0.5,
-        y=1.07,
+        y=1.08,
         showarrow=False,
-        font=dict(size=13, color="#444"),
+        font=dict(size=12, color="#444"),
         align="center",
-        bgcolor="rgba(240,240,240,0.85)",
+        bgcolor="rgba(240,240,240,0.90)",
         bordercolor="#aaa",
         borderwidth=1,
         borderpad=6,
     )
 
     # -- Axis labels ---------------------------------------------------------
-    fig.update_yaxes(title_text="USD / Barrel", row=1, col=1, tickformat=".2f")
-    fig.update_yaxes(title_text="EUR / Liter", row=2, col=1, tickformat=".2f")
+    fig.update_yaxes(
+        title_text="Brent Rohöl (USD / Barrel)",
+        secondary_y=False,
+        tickformat=".2f",
+        title_font=dict(color="#1f77b4"),
+        tickfont=dict(color="#1f77b4"),
+    )
+    fig.update_yaxes(
+        title_text="Diesel (EUR / Liter)",
+        secondary_y=True,
+        tickformat=".4f",
+        title_font=dict(color="#2c3e50"),
+        tickfont=dict(color="#2c3e50"),
+    )
     fig.update_xaxes(
         title_text="Datum",
-        row=2,
-        col=1,
         tickformat="%d.%m.%Y",
         tickangle=-30,
     )
@@ -319,19 +423,18 @@ def build_dashboard(output_file: str = "dashboard.html") -> None:
             x=0.5,
             font=dict(size=18),
         ),
-        barmode="stack",
         hovermode="x unified",
         legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1,
+            orientation="v",
+            yanchor="top",
+            y=1.0,
+            xanchor="left",
+            x=1.08,
         ),
         dragmode="pan",
         template="plotly_white",
-        height=750,
-        margin=dict(t=130),
+        height=600,
+        margin=dict(t=130, r=200),
     )
 
     # Enable zoom + pan via modebar

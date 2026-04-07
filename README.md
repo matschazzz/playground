@@ -10,12 +10,13 @@ An interactive Python dashboard that visualises **UK Brent crude oil prices** an
 
 | Feature | Details |
 |---|---|
-| 📈 Brent chart | Daily USD/barrel – real data via *yfinance* or realistic simulation |
-| ⛽ Diesel chart | Stacked bar showing daily breakdown: Netto-Kraftstoffpreis · Energiesteuer (0.4704 €/L) · CO2-Steuer (~0.15 €/L) · Mehrwertsteuer (19%) – total ≈ 2.40 €/L |
+| 📈 Combined line chart | Brent crude (left axis, USD/barrel) and **five diesel lines** (right axis, EUR/litre) in a single chart: Netto-Kraftstoffpreis · Energiesteuer · CO2-Steuer · Mehrwertsteuer · Gesamt |
+| 💶 Diesel data source | Real weekly data from the **EU Weekly Oil Bulletin** (European Commission) with simulation fallback; total ≈ 2.40 €/L |
+| 🛢️ Brent data source | Real daily data via **yfinance** (BZ=F) with simulation fallback |
 | 🔍 Zoom / Pan | Mouse-wheel zoom + drag-to-pan enabled by default |
-| 🖱️ Hover tooltips | Price + date shown on mouse-over |
-| 📐 Correlation | Pearson *r* and p-value displayed at the top of the dashboard |
-| 💾 Output | Self-contained `dashboard.html` – open in any modern browser |
+| 🖱️ Hover tooltips | Price + date shown on mouse-over for all series |
+| 📐 Correlation | Pearson *r* and p-value (Brent ↔ Diesel Gesamt) displayed at the top |
+| 💾 Output | Fully self-contained `dashboard.html` – Plotly JS embedded, no internet required to view |
 
 ### Quick Start
 
@@ -46,4 +47,6 @@ start dashboard.html  # Windows
 - **numpy** – numerical operations
 - **plotly** – interactive charts
 - **scipy** – Pearson correlation (stats)
-- **yfinance** – optional real Brent price feed
+- **yfinance** – optional real Brent price feed (BZ=F)
+- **requests** – fetch EU Oil Bulletin for real German diesel prices
+- **openpyxl** – parse the Oil Bulletin Excel workbook
