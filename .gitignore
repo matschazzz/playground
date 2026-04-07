@@ -1,0 +1,18 @@
+# Generated dashboard output
+dashboard.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
