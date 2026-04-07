@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Öl &amp; Diesel Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    border-bottom: 1px solid #334155;
+    padding: 1rem 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  header h1 {
+    font-size: clamp(1rem, 4vw, 1.4rem);
+    font-weight: 700;
+    background: linear-gradient(90deg, #38bdf8, #818cf8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  header .subtitle {
+    font-size: 0.75rem;
+    color: #94a3b8;
+    margin-top: 2px;
+  }
+  .icon { font-size: 1.8rem; }
+  main { padding: 1rem; max-width: 1200px; margin: 0 auto; }
+
+  /* KPI cards */
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .kpi {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 0.85rem 1rem;
+    text-align: center;
+  }
+  .kpi .label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+  .kpi .value { font-size: 1.4rem; font-weight: 700; margin-top: 4px; }
+  .kpi .change { font-size: 0.75rem; margin-top: 2px; }
+  .pos { color: #34d399; }
+  .neg { color: #f87171; }
+  .neu { color: #94a3b8; }
+
+  /* Correlation banner */
+  .corr-banner {
+    background: linear-gradient(135deg, #1e293b, #0f2044);
+    border: 1px solid #3b82f6;
+    border-radius: 12px;
+    padding: 0.85rem 1.25rem;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .corr-badge {
+    background: #3b82f6;
+    color: #fff;
+    font-size: 1.2rem;
+    font-weight: 800;
+    padding: 0.25rem 0.75rem;
+    border-radius: 8px;
+  }
+  .corr-desc { font-size: 0.85rem; color: #cbd5e1; flex: 1; min-width: 180px; }
+  .corr-desc strong { color: #e2e8f0; }
+
+  /* Charts */
+  .chart-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 0.5rem 0.25rem;
+    margin-bottom: 1rem;
+    overflow: hidden;
+  }
+  .chart-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #94a3b8;
+    padding: 0.5rem 1rem 0;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+  .plotly-graph-div { width: 100% !important; }
+
+  footer {
+    text-align: center;
+    padding: 1.5rem;
+    font-size: 0.7rem;
+    color: #475569;
+    border-top: 1px solid #1e293b;
+  }
+</style>
+</head>
+<body>
+<header>
+  <span class="icon">🛢️</span>
+  <div>
+    <h1>Öl &amp; Diesel Preisdashboard</h1>
+    <div class="subtitle">Letzte 4 Wochen · Stand: 06.04.2026</div>
+  </div>
+</header>
+
+<main>
+  <div class="kpi-grid" id="kpiGrid"></div>
+  <div class="corr-banner" id="corrBanner"></div>
+  <div class="chart-card">
+    <div class="chart-title">🛢️ UK Brent Rohöl (USD / Barrel)</div>
+    <div id="chartBrent"></div>
+  </div>
+  <div class="chart-card">
+    <div class="chart-title">⛽ Diesel Deutschland (EUR / Liter)</div>
+    <div id="chartDiesel"></div>
+  </div>
+</main>
+
+<footer>Daten simuliert für Demo-Zwecke · Generiert am 06.04.2026</footer>
+
+<script>
+const DATA = {"dates": ["2026-03-10", "2026-03-11", "2026-03-12", "2026-03-13", "2026-03-16", "2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20", "2026-03-23", "2026-03-24", "2026-03-25", "2026-03-26", "2026-03-27", "2026-03-30", "2026-03-31", "2026-04-01", "2026-04-02", "2026-04-03", "2026-04-06"], "brent": [82.5, 80.79, 79.98, 78.98, 79.83, 80.47, 81.88, 80.39, 80.11, 78.42, 77.41, 77.43, 75.73, 74.65, 75.19, 75.35, 74.34, 74.66, 75.77, 73.99], "diesel": [1.726, 1.716, 1.709, 1.699, 1.709, 1.712, 1.719, 1.705, 1.706, 1.695, 1.69, 1.692, 1.68, 1.676, 1.679, 1.681, 1.677, 1.68, 1.691, 1.679], "correlation": 0.9779, "corr_text": "sehr stark positiv", "generated": "06.04.2026"};
+
+// ── KPI cards ────────────────────────────────────────────────────────────────
+function kpiCard(label, value, unit, change) {
+  const dir = change > 0 ? "pos" : change < 0 ? "neg" : "neu";
+  const arrow = change > 0 ? "▲" : change < 0 ? "▼" : "–";
+  return `<div class="kpi">
+    <div class="label">${label}</div>
+    <div class="value">${value} <span style="font-size:0.8rem;color:#94a3b8">${unit}</span></div>
+    <div class="change ${dir}">${arrow} ${Math.abs(change).toFixed(2)} ${unit}</div>
+  </div>`;
+}
+
+const bLast  = DATA.brent[DATA.brent.length - 1];
+const bFirst = DATA.brent[0];
+const dLast  = DATA.diesel[DATA.diesel.length - 1];
+const dFirst = DATA.diesel[0];
+const bMin   = Math.min(...DATA.brent);
+const bMax   = Math.max(...DATA.brent);
+const dMin   = Math.min(...DATA.diesel);
+const dMax   = Math.max(...DATA.diesel);
+
+document.getElementById("kpiGrid").innerHTML =
+  kpiCard("Brent aktuell", bLast.toFixed(2), "USD", bLast - bFirst) +
+  kpiCard("Brent Tief", bMin.toFixed(2), "USD", 0) +
+  kpiCard("Brent Hoch", bMax.toFixed(2), "USD", 0) +
+  kpiCard("Diesel aktuell", dLast.toFixed(3), "€", dLast - dFirst) +
+  kpiCard("Diesel Tief", dMin.toFixed(3), "€", 0) +
+  kpiCard("Diesel Hoch", dMax.toFixed(3), "€", 0);
+
+// ── Correlation banner ───────────────────────────────────────────────────────
+document.getElementById("corrBanner").innerHTML = `
+  <span>📊 Pearson-Korrelation</span>
+  <span class="corr-badge">${DATA.correlation}</span>
+  <span class="corr-desc">
+    <strong>${DATA.corr_text}</strong> Korrelation zwischen Brent-Rohöl und Dieselpreisen
+    in Deutschland. Werte nahe +1 bedeuten, dass beide Preise fast gleichzeitig steigen und fallen.
+  </span>`;
+
+// ── Shared Plotly config ─────────────────────────────────────────────────────
+const LAYOUT_BASE = {
+  paper_bgcolor: "rgba(0,0,0,0)",
+  plot_bgcolor:  "rgba(0,0,0,0)",
+  font: { color: "#94a3b8", size: 11 },
+  margin: { l: 55, r: 20, t: 20, b: 55 },
+  xaxis: {
+    type: "date",
+    gridcolor: "#1e293b",
+    linecolor: "#334155",
+    tickcolor: "#334155",
+    tickformat: "%d.%m.",
+    tickangle: -30,
+    rangeslider: { visible: false },
+    rangeselector: {
+      bgcolor: "#1e293b",
+      activecolor: "#3b82f6",
+      bordercolor: "#334155",
+      font: { color: "#94a3b8", size: 10 },
+      buttons: [
+        { count: 7,  label: "1W",  step: "day", stepmode: "backward" },
+        { count: 14, label: "2W",  step: "day", stepmode: "backward" },
+        { count: 28, label: "4W",  step: "day", stepmode: "backward" },
+        { step: "all", label: "All" }
+      ]
+    }
+  },
+  yaxis: {
+    gridcolor: "#1e293b",
+    linecolor: "#334155",
+    tickcolor: "#334155",
+  },
+  hovermode: "x unified",
+  dragmode: "zoom",
+};
+
+const CONFIG = {
+  responsive: true,
+  displayModeBar: true,
+  modeBarButtonsToAdd: ["toggleSpikelines"],
+  modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"],
+  displaylogo: false,
+  scrollZoom: true,
+  toImageButtonOptions: { format: "png", filename: "oil_diesel_dashboard" },
+};
+
+// ── Brent chart ──────────────────────────────────────────────────────────────
+const brentTrace = {
+  x: DATA.dates,
+  y: DATA.brent,
+  type: "scatter",
+  mode: "lines+markers",
+  name: "Brent (USD/Barrel)",
+  line:   { color: "#38bdf8", width: 2.5, shape: "spline" },
+  marker: { color: "#38bdf8", size: 5 },
+  fill: "tozeroy",
+  fillcolor: "rgba(56,189,248,0.08)",
+  hovertemplate: "<b>%{x|%d.%m.%Y}</b><br>Brent: <b>%{y:.2f} USD</b><extra></extra>",
+};
+
+Plotly.newPlot("chartBrent", [brentTrace],
+  { ...LAYOUT_BASE,
+    yaxis: { ...LAYOUT_BASE.yaxis, title: { text: "USD / Barrel", standoff: 8 } }
+  }, CONFIG);
+
+// ── Diesel chart ─────────────────────────────────────────────────────────────
+const dieselTrace = {
+  x: DATA.dates,
+  y: DATA.diesel,
+  type: "scatter",
+  mode: "lines+markers",
+  name: "Diesel (€/Liter)",
+  line:   { color: "#f59e0b", width: 2.5, shape: "spline" },
+  marker: { color: "#f59e0b", size: 5 },
+  fill: "tozeroy",
+  fillcolor: "rgba(245,158,11,0.08)",
+  hovertemplate: "<b>%{x|%d.%m.%Y}</b><br>Diesel: <b>%{y:.3f} €</b><extra></extra>",
+};
+
+Plotly.newPlot("chartDiesel", [dieselTrace],
+  { ...LAYOUT_BASE,
+    yaxis: { ...LAYOUT_BASE.yaxis, title: { text: "EUR / Liter", standoff: 8 } }
+  }, CONFIG);
+
+// ── Responsive resize ────────────────────────────────────────────────────────
+window.addEventListener("resize", () => {
+  Plotly.relayout("chartBrent",  { autosize: true });
+  Plotly.relayout("chartDiesel", { autosize: true });
+});
+</script>
+</body>
+</html>
