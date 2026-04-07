@@ -114,13 +114,29 @@ def _fetch_fred_brent(dates: pd.DatetimeIndex) -> pd.Series | None:
     if not _REQUESTS_AVAILABLE:
         return None
 
-    url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DCOILBRENTEU"
+    # Request only the range we need; include a proper User-Agent so that
+    # the FRED web server does not mistake the request for bot traffic.
+    observation_start = dates[0].date().isoformat()
+    observation_end = dates[-1].date().isoformat()
+    url = (
+        "https://fred.stlouisfed.org/graph/fredgraph.csv"
+        f"?id=DCOILBRENTEU&cosd={observation_start}&coed={observation_end}"
+    )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": "text/csv,text/plain,*/*",
+    }
     try:
-        resp = _requests.get(url, timeout=15)
+        resp = _requests.get(url, headers=headers, timeout=20)
         if resp.status_code != 200:
             return None
 
         df = pd.read_csv(io.StringIO(resp.text))
+        if df.shape[1] != 2:  # guard against HTML / unexpected responses
+            return None
         df.columns = ["date", "price"]
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df = df.dropna(subset=["date"]).set_index("date")
@@ -130,6 +146,8 @@ def _fetch_fred_brent(dates: pd.DatetimeIndex) -> pd.Series | None:
         if series.empty:
             return None
         series = series.reindex(dates).ffill().bfill()
+        if series.isna().all():
+            return None
         series.name = "Brent (USD/barrel)"
         return series
     except Exception:  # pragma: no cover – network errors
@@ -152,12 +170,16 @@ def fetch_brent_prices(dates: pd.DatetimeIndex) -> pd.Series:
        when both network sources are unreachable.
     """
     # 1. Official source: FRED / EIA
+    print("Brent: versuche FRED/EIA (DCOILBRENTEU)...")
     fred_data = _fetch_fred_brent(dates)
     if fred_data is not None:
+        print("Brent: FRED/EIA-Daten erfolgreich geladen.")
         return fred_data
+    print("Brent: FRED/EIA nicht verfügbar.")
 
     # 2. Secondary source: yfinance
     if _YFINANCE_AVAILABLE:
+        print("Brent: versuche yfinance (BZ=F)...")
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -171,11 +193,14 @@ def fetch_brent_prices(dates: pd.DatetimeIndex) -> pd.Series:
             if not raw.empty:
                 close = raw["Close"].squeeze()
                 close.index = pd.to_datetime(close.index)
+                print("Brent: yfinance-Daten erfolgreich geladen.")
                 return close.reindex(dates).ffill().bfill().rename("Brent (USD/barrel)")
         except Exception:  # pragma: no cover – network errors
             pass
+        print("Brent: yfinance nicht verfügbar.")
 
     # 3. Simulated data – realistic Brent price movement around ~82 USD/bbl
+    print("Brent: WARNUNG – verwende simulierte Daten (keine Echtdaten verfügbar).")
     rng = np.random.default_rng(seed=42)
     returns = rng.normal(loc=0.0, scale=BRENT_VOLATILITY_SCALE, size=len(dates))
     prices = BRENT_BASE_PRICE + np.cumsum(returns)
@@ -226,12 +251,27 @@ def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
     if not _REQUESTS_AVAILABLE:
         return None
 
+    # Include a proper User-Agent so the Commission's server does not mistake
+    # the request for bot traffic.  The Excel file is large (~3 MB), so allow
+    # a generous timeout.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+            "application/vnd.ms-excel,*/*"
+        ),
+    }
+
     resp = None
     for url in _eu_oil_bulletin_urls():
         try:
-            r = _requests.get(url, timeout=15)
+            r = _requests.get(url, headers=headers, timeout=30)
             if r.status_code == 200:
                 resp = r
+                print(f"Diesel: EU Oil Bulletin-Datei heruntergeladen ({url})")
                 break
         except Exception:  # pragma: no cover – network errors
             continue
@@ -269,6 +309,8 @@ def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
                         # Prices in the bulletin are in EUR/1000 litres
                         s = s / 1000.0
                         s = s.reindex(dates).ffill().bfill()
+                        if s.isna().all():
+                            continue
                         s.name = "Gesamt"
                         return s
     except Exception:  # pragma: no cover – network / parse errors
@@ -303,9 +345,11 @@ def fetch_diesel_prices(
     n = len(dates)
 
     # -- Try real data first -------------------------------------------------
+    print("Diesel: versuche EU Weekly Oil Bulletin (Europäische Kommission)...")
     real_total = _fetch_eu_oil_bulletin_diesel(dates)
 
     if real_total is not None:
+        print("Diesel: EU Oil Bulletin-Daten erfolgreich geladen.")
         # Decompose the real total into fixed + variable components
         before_mwst = real_total / (1.0 + DIESEL_MWST_RATE)
         mwst = real_total - before_mwst
@@ -324,6 +368,7 @@ def fetch_diesel_prices(
         )
 
     # -- Simulation fallback -------------------------------------------------
+    print("Diesel: WARNUNG – verwende simulierte Daten (EU Oil Bulletin nicht verfügbar).")
     rng = np.random.default_rng(seed=99)
 
     # Independent daily noise for the net price
