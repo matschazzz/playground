@@ -11,8 +11,8 @@ An interactive Python dashboard that visualises **UK Brent crude oil prices** an
 | Feature | Details |
 |---|---|
 | 📈 Combined line chart | Brent crude (left axis, USD/barrel) and **five diesel lines** (right axis, EUR/litre) in a single chart: Netto-Kraftstoffpreis · Energiesteuer · CO2-Steuer · Mehrwertsteuer · Gesamt |
-| 💶 Diesel data source | Real weekly data from the **EU Weekly Oil Bulletin** (European Commission) with simulation fallback; total ≈ 2.40 €/L |
-| 🛢️ Brent data source | Real daily data via **yfinance** (BZ=F) with simulation fallback |
+| 💶 Diesel data source | Real weekly data from the **EU Weekly Oil Bulletin** (European Commission, DG Energy) with simulation fallback; total ≈ 2.40 €/L |
+| 🛢️ Brent data source | Real daily data from **FRED / EIA** (U.S. Energy Information Administration via Federal Reserve Bank of St. Louis, series `DCOILBRENTEU`) with yfinance secondary fallback and simulation fallback |
 | 🔍 Zoom / Pan | Mouse-wheel zoom + drag-to-pan enabled by default |
 | 🖱️ Hover tooltips | Price + date shown on mouse-over for all series |
 | 📐 Correlation | Pearson *r* and p-value (Brent ↔ Diesel Gesamt) displayed at the top |
@@ -47,6 +47,6 @@ start dashboard.html  # Windows
 - **numpy** – numerical operations
 - **plotly** – interactive charts
 - **scipy** – Pearson correlation (stats)
-- **yfinance** – optional real Brent price feed (BZ=F)
-- **requests** – fetch EU Oil Bulletin for real German diesel prices
+- **yfinance** – secondary Brent price feed (BZ=F), used when FRED is unavailable
+- **requests** – fetch FRED CSV and EU Oil Bulletin for real price data
 - **openpyxl** – parse the Oil Bulletin Excel workbook
