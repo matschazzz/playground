@@ -9,8 +9,13 @@ Features:
   each diesel price component as its own line (right axis, EUR/litre):
     Netto-Kraftstoffpreis | Energiesteuer | CO2-Steuer | Mehrwertsteuer | Gesamt
 - Real data sources:
-    * Brent crude: yfinance (BZ=F) with simulation fallback
-    * German diesel: EU Weekly Oil Bulletin with simulation fallback
+    * Brent crude: FRED / EIA (primary), yfinance (secondary), simulation fallback
+      - FRED series DCOILBRENTEU published by the U.S. Energy Information
+        Administration via the Federal Reserve Bank of St. Louis
+        https://fred.stlouisfed.org/series/DCOILBRENTEU
+    * German diesel: EU Weekly Oil Bulletin (European Commission, DG Energy)
+        https://energy.ec.europa.eu/data-and-analysis/weekly-oil-bulletin_en
+      with simulation fallback
 - Zoom / Pan / Hover-Tooltip interactivity (powered by Plotly)
 - Pearson correlation coefficient displayed in the dashboard
 - Exported as a fully self-contained HTML file (dashboard.html,
@@ -94,14 +99,87 @@ def _date_range_last_4_weeks() -> pd.DatetimeIndex:
     return pd.bdate_range(start=start, end=end)
 
 
+def _fetch_fred_brent(dates: pd.DatetimeIndex) -> pd.Series | None:
+    """
+    Fetch UK Brent crude oil spot prices (USD/barrel) from FRED.
+
+    Source: U.S. Energy Information Administration (EIA), distributed by the
+    Federal Reserve Bank of St. Louis (FRED).
+    Series: DCOILBRENTEU – Crude Oil Prices: Brent – Europe, USD per Barrel.
+    URL: https://fred.stlouisfed.org/series/DCOILBRENTEU
+
+    Returns a daily Series aligned to *dates* on success, or None when the
+    data cannot be retrieved.
+    """
+    if not _REQUESTS_AVAILABLE:
+        return None
+
+    # Request only the range we need; include a proper User-Agent so that
+    # the FRED web server does not mistake the request for bot traffic.
+    observation_start = dates[0].date().isoformat()
+    observation_end = dates[-1].date().isoformat()
+    url = (
+        "https://fred.stlouisfed.org/graph/fredgraph.csv"
+        f"?id=DCOILBRENTEU&cosd={observation_start}&coed={observation_end}"
+    )
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": "text/csv,text/plain,*/*",
+    }
+    try:
+        resp = _requests.get(url, headers=headers, timeout=20)
+        if resp.status_code != 200:
+            return None
+
+        df = pd.read_csv(io.StringIO(resp.text))
+        if df.shape[1] != 2:  # guard against HTML / unexpected responses
+            return None
+        df.columns = ["date", "price"]
+        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df = df.dropna(subset=["date"]).set_index("date")
+        # FRED uses "." for missing observations; convert to NaN
+        df["price"] = pd.to_numeric(df["price"], errors="coerce")
+        series = df["price"].dropna()
+        if series.empty:
+            return None
+        series = series.reindex(dates).ffill().bfill()
+        if series.isna().all():
+            return None
+        series.name = "Brent (USD/barrel)"
+        return series
+    except Exception:  # pragma: no cover – network errors
+        pass
+    return None
+
+
 def fetch_brent_prices(dates: pd.DatetimeIndex) -> pd.Series:
     """
     Fetch UK Brent crude oil prices (USD/barrel).
 
-    Tries yfinance first (ticker BZ=F). Falls back to realistic simulated data
-    if yfinance is unavailable or returns no data.
+    Data-source priority:
+    1. **FRED / EIA** – official daily spot prices published by the U.S. Energy
+       Information Administration (EIA) via the Federal Reserve Bank of St.
+       Louis (FRED), series DCOILBRENTEU.
+       https://fred.stlouisfed.org/series/DCOILBRENTEU
+    2. **yfinance** (BZ=F) – ICE Brent futures via Yahoo Finance, used as a
+       secondary source when FRED is unavailable.
+    3. **Simulated data** – realistic random-walk around ~82 USD/bbl, used only
+       when both network sources are unreachable.
     """
+    # 1. Official source: FRED / EIA
+    print("Brent: versuche FRED/EIA (DCOILBRENTEU)...")
+    fred_data = _fetch_fred_brent(dates)
+    if fred_data is not None:
+        print("Brent: FRED/EIA-Daten erfolgreich geladen.")
+        return fred_data
+    print("Brent: FRED/EIA nicht verfügbar.")
+
+    # 2. Secondary source: yfinance
     if _YFINANCE_AVAILABLE:
+        print("Brent: versuche yfinance (BZ=F)...")
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -115,15 +193,43 @@ def fetch_brent_prices(dates: pd.DatetimeIndex) -> pd.Series:
             if not raw.empty:
                 close = raw["Close"].squeeze()
                 close.index = pd.to_datetime(close.index)
+                print("Brent: yfinance-Daten erfolgreich geladen.")
                 return close.reindex(dates).ffill().bfill().rename("Brent (USD/barrel)")
         except Exception:  # pragma: no cover – network errors
             pass
+        print("Brent: yfinance nicht verfügbar.")
 
-    # Simulated data – realistic Brent price movement around ~82 USD/bbl
+    # 3. Simulated data – realistic Brent price movement around ~82 USD/bbl
+    print("Brent: WARNUNG – verwende simulierte Daten (keine Echtdaten verfügbar).")
     rng = np.random.default_rng(seed=42)
     returns = rng.normal(loc=0.0, scale=BRENT_VOLATILITY_SCALE, size=len(dates))
     prices = BRENT_BASE_PRICE + np.cumsum(returns)
     return pd.Series(prices, index=dates, name="Brent (USD/barrel)")
+
+
+def _eu_oil_bulletin_urls() -> list[str]:
+    """
+    Return a list of candidate EU Weekly Oil Bulletin URLs to try, in order of
+    preference (most recent month first, going back up to 6 months).
+
+    The European Commission publishes the Excel workbook with a date-stamped
+    path that is updated roughly once a month.  Because there is no single
+    "latest" permalink, we generate URLs for the current and the five preceding
+    months and try each one until a successful HTTP 200 response is received.
+    """
+    today = datetime.date.today()
+    urls: list[str] = []
+    year, month = today.year, today.month
+    for _ in range(6):
+        urls.append(
+            f"https://energy.ec.europa.eu/system/files/"
+            f"{year}-{month:02d}/Oil_Bulletin_Prices_History.xlsx"
+        )
+        month -= 1
+        if month == 0:
+            month = 12
+            year -= 1
+    return urls
 
 
 def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
@@ -134,23 +240,46 @@ def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
 
     Source: https://energy.ec.europa.eu/data-and-analysis/weekly-oil-bulletin_en
 
+    The URL of the Excel workbook is date-stamped and updated monthly.  This
+    function tries candidate URLs for the current and preceding months so that
+    the dashboard always fetches the most recently published file without
+    requiring a manual URL update.
+
     Returns a daily Series (forward-filled from weekly values) on success, or
     None if the data cannot be retrieved.
     """
     if not _REQUESTS_AVAILABLE:
         return None
 
-    # The Commission publishes the full historical prices in a single Excel
-    # workbook.  The URL is stable across updates.
-    url = (
-        "https://energy.ec.europa.eu/system/files/"
-        "2024-12/Oil_Bulletin_Prices_History.xlsx"
-    )
-    try:
-        resp = _requests.get(url, timeout=15)
-        if resp.status_code != 200:
-            return None
+    # Include a proper User-Agent so the Commission's server does not mistake
+    # the request for bot traffic.  The Excel file is large (~3 MB), so allow
+    # a generous timeout.
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) "
+            "Gecko/20100101 Firefox/125.0"
+        ),
+        "Accept": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+            "application/vnd.ms-excel,*/*"
+        ),
+    }
 
+    resp = None
+    for url in _eu_oil_bulletin_urls():
+        try:
+            r = _requests.get(url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                resp = r
+                print(f"Diesel: EU Oil Bulletin-Datei heruntergeladen ({url})")
+                break
+        except Exception:  # pragma: no cover – network errors
+            continue
+
+    if resp is None:
+        return None
+
+    try:
         xl = pd.read_excel(
             io.BytesIO(resp.content),
             sheet_name=None,  # load all sheets so we can search
@@ -180,6 +309,8 @@ def _fetch_eu_oil_bulletin_diesel(dates: pd.DatetimeIndex) -> pd.Series | None:
                         # Prices in the bulletin are in EUR/1000 litres
                         s = s / 1000.0
                         s = s.reindex(dates).ffill().bfill()
+                        if s.isna().all():
+                            continue
                         s.name = "Gesamt"
                         return s
     except Exception:  # pragma: no cover – network / parse errors
@@ -214,9 +345,11 @@ def fetch_diesel_prices(
     n = len(dates)
 
     # -- Try real data first -------------------------------------------------
+    print("Diesel: versuche EU Weekly Oil Bulletin (Europäische Kommission)...")
     real_total = _fetch_eu_oil_bulletin_diesel(dates)
 
     if real_total is not None:
+        print("Diesel: EU Oil Bulletin-Daten erfolgreich geladen.")
         # Decompose the real total into fixed + variable components
         before_mwst = real_total / (1.0 + DIESEL_MWST_RATE)
         mwst = real_total - before_mwst
@@ -235,6 +368,7 @@ def fetch_diesel_prices(
         )
 
     # -- Simulation fallback -------------------------------------------------
+    print("Diesel: WARNUNG – verwende simulierte Daten (EU Oil Bulletin nicht verfügbar).")
     rng = np.random.default_rng(seed=99)
 
     # Independent daily noise for the net price
